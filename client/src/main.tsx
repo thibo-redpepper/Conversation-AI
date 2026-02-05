@@ -1,0 +1,21 @@
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import App from "./App";
+import Dashboard from "./pages/Dashboard";
+import CrmPipedrive from "./pages/CrmPipedrive";
+import DnsSetup from "./pages/DnsSetup";
+import "./index.css";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<App />} />
+        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/crm/pipedrive" element={<CrmPipedrive />} />
+        <Route path="/crm/dns" element={<DnsSetup />} />
+      </Routes>
+    </BrowserRouter>
+  </React.StrictMode>
+);

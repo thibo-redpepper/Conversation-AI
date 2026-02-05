@@ -1,0 +1,17 @@
+{
+  "name": "ghl-vastgoed-inbox-tool",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "build": "npm --prefix server run build && npm --prefix client run build",
+    "test": "npm --prefix server run test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}
