@@ -218,7 +218,7 @@ const syncAccount = async (
 
     const freshMessages = messageList.filter((msg) => {
       const ts = Date.parse(msg.timestamp ?? "");
-      return ts > lastSynced;
+      return ts > (lastSynced ?? 0);
     });
 
     const newInbound = freshMessages.filter((msg) =>

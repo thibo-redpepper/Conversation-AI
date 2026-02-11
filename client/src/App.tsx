@@ -3,8 +3,9 @@ import { NavLink } from "react-router-dom";
 import ContactSearch from "./components/ContactSearch";
 import ConversationList from "./components/ConversationList";
 import ThreadView from "./components/ThreadView";
-import Composer from "./components/Composer";
-import { Contact, Conversation, Message, MessageFilter } from "./types";
+import Composer, { ComposerSuggestMode } from "./components/Composer";
+import { AiAgent, Contact, Conversation, Message, MessageFilter } from "./types";
+import { loadAgents } from "./utils/aiAgents";
 
 const apiRequest = async <T,>(url: string, options?: RequestInit): Promise<T> => {
   const response = await fetch(url, {
@@ -77,6 +78,7 @@ const App: React.FC = () => {
   const [sendSuccess, setSendSuccess] = useState<string | undefined>();
 
   const [suggesting, setSuggesting] = useState(false);
+  const [suggestMode, setSuggestMode] = useState<ComposerSuggestMode>("standard");
   const [suggestMeta, setSuggestMeta] = useState<{
     usd?: number;
     eur?: number;
@@ -86,6 +88,8 @@ const App: React.FC = () => {
     outputTokens?: number;
     totalTokens?: number;
   } | null>(null);
+  const [agents, setAgents] = useState<AiAgent[]>(() => loadAgents());
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   const filteredMessages = useMemo(() => {
     if (messageFilter === "ALL") return messages;
@@ -94,6 +98,12 @@ const App: React.FC = () => {
       message.type?.toLowerCase().includes(needle)
     );
   }, [messages, messageFilter]);
+  const selectedAgent = useMemo(
+    () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
+    [agents, selectedAgentId]
+  );
+  const canSuggest =
+    suggestMode === "standard" || (suggestMode === "agent" && Boolean(selectedAgent));
 
   const loadLocations = async () => {
     try {
@@ -264,6 +274,10 @@ const App: React.FC = () => {
       setSendError("Selecteer eerst een contact en gesprek.");
       return;
     }
+    if (suggestMode === "agent" && !selectedAgent) {
+      setSendError("Kies eerst een AI Agent.");
+      return;
+    }
 
     setSuggesting(true);
     setSendError(undefined);
@@ -286,6 +300,11 @@ const App: React.FC = () => {
           conversationId: selectedConversation.id,
           contactId: selectedContact.id,
           locationId: selectedLocationId,
+          agentId:
+            suggestMode === "agent" && selectedAgent?.locationId
+              ? selectedAgent.id
+              : undefined,
+          agent: suggestMode === "agent" ? selectedAgent ?? undefined : undefined,
         }),
       });
       setBody(data.suggestion.text);
@@ -309,6 +328,12 @@ const App: React.FC = () => {
     } finally {
       setSuggesting(false);
     }
+  };
+
+  const handleSuggestModeChange = (mode: ComposerSuggestMode) => {
+    setSuggestMode(mode);
+    setSuggestMeta(null);
+    setSendError(undefined);
   };
 
   const handleSend = async () => {
@@ -371,6 +396,7 @@ const App: React.FC = () => {
 
   React.useEffect(() => {
     loadLocations();
+    setAgents(loadAgents());
   }, []);
 
   React.useEffect(() => {
@@ -408,7 +434,7 @@ const App: React.FC = () => {
     <div className="app">
       <header className="app__header">
         <div>
-          <h1>Convo AI Hub</h1>
+          <h1>LeadPilot</h1>
           <p>Multi-account inbox voor klantreacties met AI.</p>
         </div>
         <div className="header-actions">
@@ -418,6 +444,13 @@ const App: React.FC = () => {
             end
           >
             Dashboard
+          </NavLink>
+          <NavLink
+            className={({ isActive }) => `toggle ${isActive ? "toggle--active" : ""}`}
+            to="/leads"
+            end
+          >
+            Leads
           </NavLink>
           <NavLink
             className={({ isActive }) => `toggle ${isActive ? "toggle--active" : ""}`}
@@ -497,6 +530,12 @@ const App: React.FC = () => {
             subject={subject}
             body={body}
             contactInfo={selectedContactInfo}
+            agents={agents}
+            selectedAgentId={selectedAgentId}
+            onAgentChange={setSelectedAgentId}
+            suggestMode={suggestMode}
+            onSuggestModeChange={handleSuggestModeChange}
+            canSuggest={canSuggest}
             onChannelChange={setChannel}
             onSubjectChange={setSubject}
             onBodyChange={setBody}

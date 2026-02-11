@@ -34,6 +34,17 @@ Fill in:
 - `HASH_SALT` (optional; used to hash ids)
 - `SYNC_ENABLED` and `SYNC_INTERVAL_SECONDS` (optional; background sync to Supabase)
 
+### Supabase migrations for AI Agents + Workflows
+
+Run these scripts in the Supabase SQL editor (in this order):
+
+1. `server/supabase/schema.sql`
+2. `server/supabase/ai_agents.sql`
+3. `server/supabase/workflows.sql`
+
+Without `ai_agents.sql`, the AI Agents page falls back to local storage and advanced features
+(versions, publish/rollback, knowledge index, evals, handoff logging, KPI stats) are not persisted.
+
 3) Run dev servers:
 
 ```bash
@@ -69,7 +80,14 @@ npm run dev
 - DNS storage table is defined in `server/db/dns.sql`.
 - Mailgun send endpoint is `POST /api/mailgun/send` and uses `.env` keys.
 - Mailgun inbound webhook endpoint: `POST /api/mailgun/webhook/inbound`
+- Twilio inbound webhook endpoint: `POST /api/twilio/webhook/inbound` (configure this on your Twilio number).
+- Fallback polling for inbound SMS is enabled by default when Twilio creds are present:
+  - `TWILIO_INBOUND_POLL_ENABLED=true|false`
+  - `TWILIO_INBOUND_POLL_INTERVAL_SEC` (default `30`)
+  - `TWILIO_INBOUND_POLL_LOOKBACK_MIN` (default `180`)
+  - `TWILIO_INBOUND_POLL_TO_NUMBERS` (optional comma-separated receive numbers; fallback is `TWILIO_FROM_NUMBER`)
 - Use `POST /api/sync` with `{ "full": true }` to backfill all conversations.
+- AI agent selection in Conversations is intentionally manual for now.
 - Lost draft test mode uses `server/db/lost_drafts.sql` + `server/db/dashboard.sql` (view `dashboard_lost_drafts_recent`).
 
 ## Supabase (optional logging)

@@ -11,5 +11,6 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "test"]
+  "include": ["src"],
+  "exclude": ["test", "src/**/*.test.ts", "src/**/*.test.tsx", "src/**/*.test.js"]
 }

@@ -4,6 +4,11 @@ export type Contact = {
   lastName?: string;
   email?: string;
   phone?: string;
+  dateAdded?: string;
+  pipelineStageName?: string;
+  postalCode?: string;
+  city?: string;
+  source?: string;
 };
 
 export type Conversation = {
@@ -13,6 +18,10 @@ export type Conversation = {
   lastMessageDate?: string;
   unreadCount?: number;
   lastMessageBody?: string;
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  pipelineStageName?: string;
 };
 
 export type Message = {

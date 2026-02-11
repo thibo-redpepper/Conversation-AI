@@ -8,6 +8,7 @@ const ContactSchema = z.object({
   lastName: z.string().optional().nullable(),
   email: z.string().optional().nullable(),
   phone: z.string().optional().nullable(),
+  dateAdded: z.string().optional().nullable(),
 });
 
 const SearchResponseSchema = z.object({
@@ -68,6 +69,7 @@ export const searchContacts = async (
         lastName: contact.lastName ?? undefined,
         email: contact.email ?? undefined,
         phone: contact.phone ?? undefined,
+        dateAdded: contact.dateAdded ?? undefined,
       })
     );
 
@@ -111,6 +113,10 @@ export const getContactById = async (
     const payload = response.data?.contact ?? response.data;
     const parsed = ContactDetailsSchema.safeParse(payload);
     const data = parsed.success ? parsed.data : payload;
+    const raw =
+      payload && typeof payload === "object"
+        ? (payload as Record<string, unknown>)
+        : undefined;
 
     return {
       id: data.id,
@@ -130,7 +136,7 @@ export const getContactById = async (
       postalCode: data.postalCode ?? undefined,
       timezone: data.timezone ?? undefined,
       dnd: data.dnd ?? undefined,
-      raw: parsed.success ? undefined : response.data,
+      raw,
     };
   } catch (error) {
     throw mapGhlError(error);

@@ -225,21 +225,28 @@ export const filterConversationsWithInbound = async (
   max = 50
 ) => {
   const slice = conversations.slice(0, max);
-  const checks = await Promise.all(
-    slice.map(async (conversation) => {
-      try {
-        const page = await listMessages(config, conversation.id, 20);
-        const hasInbound = page.messages.some((msg) =>
-          msg.direction?.toLowerCase().includes("in")
-        );
-        return hasInbound ? conversation : null;
-      } catch {
-        return null;
-      }
-    })
-  );
+  const chunkSize = Number(process.env.CONVERSATIONS_INBOUND_CONCURRENCY ?? "8");
+  const matched: Conversation[] = [];
 
-  return checks.filter((item): item is Conversation => Boolean(item));
+  for (let index = 0; index < slice.length; index += chunkSize) {
+    const chunk = slice.slice(index, index + chunkSize);
+    const checks = await Promise.all(
+      chunk.map(async (conversation) => {
+        try {
+          const page = await listMessages(config, conversation.id, 20);
+          const hasInbound = page.messages.some((msg) =>
+            msg.direction?.toLowerCase().includes("in")
+          );
+          return hasInbound ? conversation : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+    matched.push(...checks.filter((item): item is Conversation => Boolean(item)));
+  }
+
+  return matched;
 };
 
 export type ConversationDetails = {

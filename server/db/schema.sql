@@ -1,4 +1,4 @@
--- Convo AI Hub (Supabase) schema
+-- LeadPilot (Supabase) schema
 -- Run these in Supabase SQL editor
 
 create table if not exists accounts (

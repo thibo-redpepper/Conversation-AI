@@ -1,454 +1,709 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { NavLink } from "react-router-dom";
 
-type KpiRow = {
-  account_id: string;
-  account_name: string;
-  conversations_total: number;
-  messages_total: number;
-  inbound_total: number;
-  outbound_total: number;
-  drafts_total: number;
-  last_message_at?: string | null;
-  last_draft_at?: string | null;
+type Location = { id: string; name: string };
+type RangeKey = "today" | "7d" | "30d";
+type DashboardMetricKey = "leadsInTool" | "messagesSent" | "aiChatsStarted" | "repliesReceived";
+
+type DashboardOverview = {
+  range: RangeKey;
+  startAt: string;
+  endAt: string;
+  locationId?: string | null;
+  kpis: {
+    leadsInTool: { current: number; previous: number; total: number; deltaPct: number };
+    messagesSent: { current: number; previous: number; deltaPct: number };
+    aiChatsStarted: { current: number; previous: number; deltaPct: number };
+    repliesReceived: { current: number; previous: number; deltaPct: number };
+  };
+  funnel: {
+    leadsInTool: number;
+    aiStarted: number;
+    reactions: number;
+    salesHandover: number;
+    reviewNeeded: number;
+  };
+  performance: {
+    conversionRate: number;
+    avgResponseMinutes?: number | null;
+  };
+  activeRequests: Array<{
+    id: string;
+    type: "sales_handover" | "review_needed";
+    leadName: string;
+    leadPhone?: string | null;
+    reason: string;
+    createdAt: string;
+  }>;
+  debug?: {
+    enrollmentsScanned: number;
+    sessionsScanned: number;
+    eventsScanned: number;
+    stepsScanned: number;
+    agentRunsScanned?: number;
+  };
 };
 
-type DailyRow = {
-  account_name: string;
-  day: string;
-  inbound_count: number;
-  outbound_count: number;
+type DashboardDrilldown = {
+  metric: DashboardMetricKey;
+  range: RangeKey;
+  locationId?: string | null;
+  from: string;
+  to: string;
+  count: number;
+  items: Array<{
+    id: string;
+    createdAt: string;
+    title: string;
+    subtitle?: string;
+    detail?: string;
+    source: string;
+    channel?: string;
+    payload?: Record<string, unknown> | null;
+  }>;
 };
 
-type DraftRow = {
-  draft_id: string;
-  account_name?: string | null;
-  conversation_id: string;
-  ai_reply?: string | null;
-  model?: string | null;
-  tokens?: number | null;
-  cost_eur?: number | null;
-  draft_created_at?: string | null;
-  last_inbound_body?: string | null;
-  last_inbound_time?: string | null;
+type StatTone = "blue" | "green" | "orange" | "attention";
+type FunnelTone = "blue" | "green" | "orange" | "attention";
+
+const periodLabel: Record<RangeKey, string> = {
+  today: "Vandaag",
+  "7d": "Laatste 7 dagen",
+  "30d": "Laatste 30 dagen",
 };
 
-type LostDraftRow = {
-  lost_id: string;
-  account_name?: string | null;
-  conversation_id: string;
-  message_id?: string | null;
-  status?: string | null;
-  reason?: string | null;
-  confidence?: number | null;
-  model?: string | null;
-  tokens?: number | null;
-  cost_eur?: number | null;
-  lost_created_at?: string | null;
-  last_inbound_body?: string | null;
-  last_inbound_time?: string | null;
+const formatDelta = (value: number) => {
+  if (!Number.isFinite(value)) return "0%";
+  const rounded = Math.round(value);
+  if (rounded > 0) return `+${rounded}%`;
+  return `${rounded}%`;
 };
 
-type UsageSummary = {
-  tokensTotal: number;
-  costTotal: number;
-  estimated?: boolean;
+const formatMinutes = (value?: number | null) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (value < 1) return "< 1 min";
+  return `${Math.round(value)} min`;
 };
 
-const apiRequest = async <T,>(url: string): Promise<T> => {
-  const response = await fetch(url);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data?.error || "Fout bij laden.");
-  }
-  return data as T;
+const formatRelativeTime = (value: string) => {
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts)) return "Onbekend";
+  const diffMs = Date.now() - ts;
+  if (diffMs < 60_000) return "Zojuist";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes} min geleden`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}u geleden`;
+  const days = Math.floor(hours / 24);
+  return `${days}d geleden`;
 };
 
-const formatDate = (value?: string | null) => {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString("nl-NL", {
+const formatDateTime = (value: string) => {
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts)) return value;
+  return new Date(ts).toLocaleString("nl-BE", {
     day: "2-digit",
-    month: "short",
+    month: "2-digit",
+    year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
 };
 
-const formatCost = (value?: number | null) => {
-  if (typeof value !== "number") return "—";
-  return `€${value.toFixed(4)}`;
+const StatCard: React.FC<{
+  metricKey: DashboardMetricKey;
+  title: string;
+  value: string | number;
+  helper: string;
+  trend?: string;
+  tone: StatTone;
+  icon: React.ReactNode;
+  onClick: (metric: DashboardMetricKey) => void;
+}> = ({ metricKey, title, value, helper, trend, tone, icon, onClick }) => {
+  return (
+    <button
+      type="button"
+      className="dashboard-v2-stat dashboard-v2-stat--clickable"
+      onClick={() => onClick(metricKey)}
+    >
+      <div className="dashboard-v2-stat__top">
+        <div>
+          <p>{title}</p>
+          <strong>{value}</strong>
+        </div>
+        <span className={`dashboard-v2-stat__icon dashboard-v2-stat__icon--${tone}`}>{icon}</span>
+      </div>
+      <div className="dashboard-v2-stat__bottom">
+        {trend ? <span className={`dashboard-v2-trend dashboard-v2-trend--${tone}`}>{trend}</span> : null}
+        <small>{helper}</small>
+      </div>
+    </button>
+  );
 };
 
-const formatConfidence = (value?: number | null) => {
-  if (typeof value !== "number") return "—";
-  return `${Math.round(value * 100)}%`;
+const FunnelBar: React.FC<{
+  label: string;
+  value: number;
+  width: string;
+  tone: FunnelTone;
+}> = ({ label, value, width, tone }) => {
+  return (
+    <div className="dashboard-v2-funnel__row">
+      <span>{label}</span>
+      <div className="dashboard-v2-funnel__track">
+        <div className={`dashboard-v2-funnel__fill dashboard-v2-funnel__fill--${tone}`} style={{ width }} />
+      </div>
+      <strong>{value}</strong>
+    </div>
+  );
 };
 
-const normalizeText = (value?: string | null) =>
-  (value ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+const ActivityList: React.FC<{
+  items: DashboardOverview["activeRequests"];
+}> = ({ items }) => {
+  return (
+    <section className="panel panel--leads dashboard-v2-sidecard">
+      <header className="panel__header dashboard-v2-sidecard__header">
+        <h2>Active requests</h2>
+      </header>
+      <div className="panel__body dashboard-v2-sidecard__body">
+        {items.length === 0 ? <p className="dashboard-v2-empty">Geen actieve requests in deze periode.</p> : null}
+        {items.map((item) => (
+          <article key={item.id} className="dashboard-v2-request">
+            <div className="dashboard-v2-request__top">
+              <strong>{item.leadName}</strong>
+              <span
+                className={`dashboard-v2-request__badge ${
+                  item.type === "sales_handover"
+                    ? "dashboard-v2-request__badge--sales"
+                    : "dashboard-v2-request__badge--review"
+                }`}
+              >
+                {item.type === "sales_handover" ? "Sales overdracht" : "Review nodig"}
+              </span>
+            </div>
+            <p>{item.reason}</p>
+            <div className="dashboard-v2-request__meta">
+              <span>{item.leadPhone?.trim() || "Geen nummer"}</span>
+              <span>{formatRelativeTime(item.createdAt)}</span>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+};
 
-const shouldHideDraft = (row: DraftRow) => {
-  const body = normalizeText(row.last_inbound_body);
-  if (!body || body === "(leeg)" || body === "leeg" || body === "empty") {
-    return true;
-  }
-  const skipPhrases = [
-    "dnd enabled by customer",
-    "do not disturb",
-    "do not contact",
-    "opted out",
-    "unsubscribe",
-    "unsubscribed",
-    "stop",
-    "call attempted",
-    "missed call",
-    "incoming call",
-    "call missed",
-  ];
-  if (skipPhrases.some((phrase) => body.includes(phrase))) {
-    return true;
-  }
-  return false;
+const DrilldownModal: React.FC<{
+  open: boolean;
+  metric: DashboardMetricKey | null;
+  data: DashboardDrilldown | null;
+  loading: boolean;
+  error?: string | null;
+  onClose: () => void;
+  onRefresh: () => void;
+}> = ({ open, metric, data, loading, error, onClose, onRefresh }) => {
+  if (!open || !metric) return null;
+  const titleMap: Record<DashboardMetricKey, string> = {
+    leadsInTool: "Leads in tool",
+    messagesSent: "Berichten verzonden",
+    aiChatsStarted: "AI chats gestart",
+    repliesReceived: "Reacties ontvangen",
+  };
+  return (
+    <div className="dashboard-drilldown" role="dialog" aria-modal="true">
+      <div className="dashboard-drilldown__backdrop" onClick={onClose} />
+      <div className="dashboard-drilldown__panel">
+        <header className="dashboard-drilldown__header">
+          <div>
+            <h3>{titleMap[metric]} details</h3>
+            <p>
+              {data?.count ?? 0} records in {data ? periodLabel[data.range] : periodLabel["7d"]}
+            </p>
+          </div>
+          <div className="dashboard-drilldown__actions">
+            <button className="button button--ghost" onClick={onRefresh} disabled={loading}>
+              {loading ? "Laden..." : "Vernieuwen"}
+            </button>
+            <button className="button button--ghost" onClick={onClose}>
+              Sluiten
+            </button>
+          </div>
+        </header>
+
+        {error ? <div className="alert alert--error">{error}</div> : null}
+        {loading ? <div className="alert alert--note">Detaildata laden...</div> : null}
+
+        <div className="dashboard-drilldown__list">
+          {(data?.items ?? []).map((item) => (
+            <article key={`${item.source}-${item.id}`} className="dashboard-drilldown__item">
+              <div className="dashboard-drilldown__item-head">
+                <strong>{item.title}</strong>
+                <span>{formatDateTime(item.createdAt)}</span>
+              </div>
+              {item.subtitle ? <p>{item.subtitle}</p> : null}
+              {item.detail ? <p>{item.detail}</p> : null}
+              <div className="dashboard-drilldown__meta">
+                <span>Bron: {item.source}</span>
+                {item.channel ? <span>Kanaal: {item.channel}</span> : null}
+              </div>
+              {item.payload ? (
+                <details className="dashboard-drilldown__payload">
+                  <summary>Ruwe payload</summary>
+                  <pre>{JSON.stringify(item.payload, null, 2)}</pre>
+                </details>
+              ) : null}
+            </article>
+          ))}
+          {!loading && (data?.items?.length ?? 0) === 0 ? (
+            <p className="dashboard-v2-empty">Geen records gevonden voor deze metric in de gekozen periode.</p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
 };
 
 const Dashboard: React.FC = () => {
-  const [kpis, setKpis] = useState<KpiRow[]>([]);
-  const [daily, setDaily] = useState<DailyRow[]>([]);
-  const [drafts, setDrafts] = useState<DraftRow[]>([]);
-  const [lostDrafts, setLostDrafts] = useState<LostDraftRow[]>([]);
-  const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
+  const [range, setRange] = useState<RangeKey>("7d");
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lostError, setLostError] = useState<string | null>(null);
-  const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
-  const [expandedLostId, setExpandedLostId] = useState<string | null>(null);
-  const [selectedBrand, setSelectedBrand] = useState<
-    "all" | "VastgoedMatch" | "TestAannemer"
-  >("all");
-  const [selectedAccount, setSelectedAccount] = useState<string>("all");
+  const [overview, setOverview] = useState<DashboardOverview | null>(null);
+  const [activeMetric, setActiveMetric] = useState<DashboardMetricKey | null>(null);
+  const [drilldown, setDrilldown] = useState<DashboardDrilldown | null>(null);
+  const [drilldownLoading, setDrilldownLoading] = useState(false);
+  const [drilldownError, setDrilldownError] = useState<string | null>(null);
 
-  const brandMap: Record<"VastgoedMatch" | "TestAannemer", string[]> = {
-    VastgoedMatch: ["Vastgoed"],
-    TestAannemer: ["Dakwerken", "Gevelwerken"],
+  const subaccountOptions = useMemo(() => {
+    const preferred = ["Vastgoed", "Dakwerken", "Gevelwerken"];
+    const filtered = locations.filter((loc) => preferred.includes(loc.name));
+    return filtered.length ? filtered : locations;
+  }, [locations]);
+
+  const loadLocations = async () => {
+    const response = await fetch("/api/locations");
+    const data = await response.json().catch(() => ({}));
+    setLocations(data.locations ?? []);
   };
 
-  const allAccountNames = useMemo(() => {
-    const names = new Set<string>();
-    kpis.forEach((row) => {
-      if (row.account_name) names.add(row.account_name);
-    });
-    drafts.forEach((row) => {
-      if (row.account_name) names.add(row.account_name);
-    });
-    lostDrafts.forEach((row) => {
-      if (row.account_name) names.add(row.account_name);
-    });
-    return Array.from(names).sort((a, b) => a.localeCompare(b));
-  }, [kpis, drafts, lostDrafts]);
-
-  const accountOptions =
-    selectedBrand === "all"
-      ? allAccountNames
-      : brandMap[selectedBrand] ?? [];
-
-  useEffect(() => {
-    if (selectedAccount === "all") return;
-    if (!accountOptions.includes(selectedAccount)) {
-      setSelectedAccount("all");
+  const loadOverview = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      params.set("range", range);
+      if (selectedLocationId) params.set("locationId", selectedLocationId);
+      const response = await fetch(`/api/dashboard/overview?${params.toString()}`);
+      const data = (await response.json().catch(() => ({}))) as DashboardOverview | { error?: string };
+      if (!response.ok) {
+        throw new Error((data as { error?: string })?.error || "Dashboard laden mislukt.");
+      }
+      setOverview(data as DashboardOverview);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Dashboard laden mislukt.");
+      setOverview(null);
+    } finally {
+      setLoading(false);
     }
-  }, [accountOptions, selectedAccount]);
-
-  const matchesBrand = (name?: string | null) => {
-    if (selectedBrand === "all") return true;
-    return (brandMap[selectedBrand] ?? []).includes(name ?? "");
   };
 
-  const matchesAccount = (name?: string | null) => {
-    if (selectedAccount === "all") return true;
-    return name === selectedAccount;
+  const loadDrilldown = async (metric: DashboardMetricKey) => {
+    setDrilldownLoading(true);
+    setDrilldownError(null);
+    try {
+      const params = new URLSearchParams();
+      params.set("metric", metric);
+      params.set("range", range);
+      params.set("limit", "250");
+      if (selectedLocationId) params.set("locationId", selectedLocationId);
+      const response = await fetch(`/api/dashboard/drilldown?${params.toString()}`);
+      const data = (await response.json().catch(() => ({}))) as
+        | DashboardDrilldown
+        | { error?: string };
+      if (!response.ok) {
+        throw new Error((data as { error?: string })?.error || "Detaildata laden mislukt.");
+      }
+      setDrilldown(data as DashboardDrilldown);
+    } catch (err) {
+      setDrilldownError(err instanceof Error ? err.message : "Detaildata laden mislukt.");
+      setDrilldown(null);
+    } finally {
+      setDrilldownLoading(false);
+    }
   };
-
-  const filteredDrafts = drafts.filter(
-    (row) => matchesBrand(row.account_name) && matchesAccount(row.account_name)
-  );
-  const filteredLostDrafts = lostDrafts.filter(
-    (row) => matchesBrand(row.account_name) && matchesAccount(row.account_name)
-  );
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [kpiRes, dailyRes, draftRes, usageRes] = await Promise.all([
-          apiRequest<{ data: KpiRow[] }>("/api/dashboard/kpis"),
-          apiRequest<{ data: DailyRow[] }>("/api/dashboard/daily"),
-          apiRequest<{ data: DraftRow[] }>("/api/dashboard/drafts"),
-          apiRequest<UsageSummary>("/api/dashboard/usage"),
-        ]);
-        setKpis(kpiRes.data ?? []);
-        setDaily(dailyRes.data ?? []);
-        setDrafts(draftRes.data ?? []);
-        setUsage(usageRes ?? null);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Fout bij laden.");
-      }
-
-      try {
-        const lostRes = await apiRequest<{ data: LostDraftRow[] }>(
-          "/api/dashboard/lost-drafts"
-        );
-        setLostDrafts(lostRes.data ?? []);
-      } catch (err) {
-        setLostError(err instanceof Error ? err.message : "Lost drafts laden mislukt.");
-      }
-    };
-    load();
+    void loadLocations();
   }, []);
 
+  useEffect(() => {
+    if (!selectedLocationId && subaccountOptions.length > 0) {
+      setSelectedLocationId(subaccountOptions[0].id);
+    }
+  }, [selectedLocationId, subaccountOptions]);
+
+  useEffect(() => {
+    if (!selectedLocationId) return;
+    void loadOverview();
+  }, [selectedLocationId, range]);
+
+  useEffect(() => {
+    if (!activeMetric || !selectedLocationId) return;
+    void loadDrilldown(activeMetric);
+  }, [activeMetric, range, selectedLocationId]);
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setActiveMetric(null);
+      }
+    };
+    if (activeMetric) {
+      window.addEventListener("keydown", handleEscape);
+    }
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [activeMetric]);
+
+  const openMetric = (metric: DashboardMetricKey) => {
+    setActiveMetric(metric);
+    setDrilldown(null);
+    void loadDrilldown(metric);
+  };
+
+  const activeLocationName =
+    subaccountOptions.find((item) => item.id === selectedLocationId)?.name ?? "Subaccount";
+
+  const funnelMax = Math.max(
+    overview?.funnel.leadsInTool ?? 0,
+    overview?.funnel.aiStarted ?? 0,
+    overview?.funnel.reactions ?? 0,
+    overview?.funnel.salesHandover ?? 0,
+    overview?.funnel.reviewNeeded ?? 0,
+    1
+  );
+  const toPct = (value: number) => `${Math.max(0, Math.min(100, (value / funnelMax) * 100))}%`;
+
   return (
-    <div className="app">
-      <header className="app__header">
-        <div>
-          <h1>Convo AI Hub — Dashboard</h1>
-          <p>Overzicht van drafts en conversation volumes. Drafts worden niet verzonden.</p>
+    <div className="ghl-shell ghl-shell--leads ghl-shell--dashboard">
+      <aside className="ghl-sidebar">
+        <div className="ghl-brand">
+          <span className="ghl-brand__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" className="ghl-icon">
+              <path d="M4 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2zm6-3h4a2 2 0 0 1 2 2v1H8V6a2 2 0 0 1 2-2z" />
+            </svg>
+          </span>
+          <div>
+            <strong>LeadPilot</strong>
+            <span>Dashboard</span>
+          </div>
         </div>
-        <div className="header-actions">
-          {usage ? (
-            <div className="dashboard-usage">
-              <div>
-                <span>Totaal tokens</span>
-                <strong>{usage.tokensTotal ?? 0}</strong>
-              </div>
-              <div>
-                <span>Totaal kost</span>
-                <strong>{formatCost(usage.costTotal)}</strong>
-                {usage.estimated ? <em>schatting</em> : null}
-              </div>
-            </div>
-          ) : null}
-          <div className="dashboard-filters">
-            <div className="location-select">
-              <label>Merk</label>
+
+        <div className="ghl-account">
+          <label>Subaccount</label>
+          <select
+            className="input"
+            value={selectedLocationId ?? ""}
+            onChange={(event) => setSelectedLocationId(event.target.value)}
+          >
+            {subaccountOptions.map((loc) => (
+              <option key={loc.id} value={loc.id}>
+                {loc.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <nav className="ghl-nav">
+          <NavLink
+            className={({ isActive }) => `ghl-nav__item ${isActive ? "ghl-nav__item--active" : ""}`}
+            to="/dashboard"
+          >
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />
+              </svg>
+            </span>
+            Dashboard
+          </NavLink>
+          <NavLink
+            className={({ isActive }) => `ghl-nav__item ${isActive ? "ghl-nav__item--active" : ""}`}
+            to="/leads"
+          >
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M7.5 12a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm9 0a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zM3 20.5c0-3 3-5.5 6.5-5.5S16 17.5 16 20.5V22H3v-1.5zm9.5 1.5v-1.5c0-1.6-.6-3-1.6-4.1.8-.3 1.7-.4 2.6-.4 3.6 0 6.5 2.5 6.5 5.5V22h-7.5z" />
+              </svg>
+            </span>
+            Leads
+          </NavLink>
+          <NavLink
+            className={({ isActive }) => `ghl-nav__item ${isActive ? "ghl-nav__item--active" : ""}`}
+            to="/conversations"
+          >
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M4 5h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H8l-4 4V7a2 2 0 0 1 2-2zm3 4h10v2H7V9zm0 4h7v2H7v-2z" />
+              </svg>
+            </span>
+            Conversations
+          </NavLink>
+          <NavLink
+            className={({ isActive }) => `ghl-nav__item ${isActive ? "ghl-nav__item--active" : ""}`}
+            to="/ai-agents"
+          >
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2zm7 9l.9 2.6L22 14l-2.1.4L19 17l-.9-2.6L16 14l2.1-.4L19 11zM5 13l.9 2.6L8 16l-2.1.4L5 19l-.9-2.6L2 16l2.1-.4L5 13z" />
+              </svg>
+            </span>
+            AI Agents
+          </NavLink>
+          <NavLink
+            className={({ isActive }) => `ghl-nav__item ${isActive ? "ghl-nav__item--active" : ""}`}
+            to="/workflows"
+          >
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M9 3h6v4h2a2 2 0 0 1 2 2v2h-4V9H9v4H5V9a2 2 0 0 1 2-2h2V3zm-4 12h4v4H7a2 2 0 0 1-2-2v-2zm6 0h4v6h-4v-6zm6 0h4v2a2 2 0 0 1-2 2h-2v-4z" />
+              </svg>
+            </span>
+            Workflows
+          </NavLink>
+          <button className="ghl-nav__item">
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M7 2h2v3H7V2zm8 0h2v3h-2V2zM4 5h16a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm0 6h16v9H4v-9z" />
+              </svg>
+            </span>
+            Calendar
+          </button>
+          <button className="ghl-nav__item">
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M4 20V4h2v16H4zm7 0V9h2v11h-2zm7 0V13h2v7h-2z" />
+              </svg>
+            </span>
+            Analytics
+          </button>
+          <button className="ghl-nav__item">
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M3 6h18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zm0 4h18V8H3v2zm4 6h4v2H7v-2z" />
+              </svg>
+            </span>
+            Billing
+          </button>
+          <button className="ghl-nav__item">
+            <span className="ghl-nav__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="ghl-icon">
+                <path d="M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm8.4 4a6.4 6.4 0 0 0-.1-1l2.1-1.6-2-3.5-2.5 1a7.7 7.7 0 0 0-1.7-1l-.3-2.7h-4l-.3 2.7a7.7 7.7 0 0 0-1.7 1l-2.5-1-2 3.5L3.6 11a6.4 6.4 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.7 7.7 0 0 0 1.7 1l.3 2.7h4l.3-2.7a7.7 7.7 0 0 0 1.7-1l2.5 1 2-3.5-2.1-1.6c.1-.3.1-.6.1-1z" />
+              </svg>
+            </span>
+            Settings
+          </button>
+        </nav>
+      </aside>
+
+      <main className="ghl-main ghl-main--leads ghl-main--dashboard">
+        <header className="ghl-main__header ghl-main__header--leads">
+          <div>
+            <h1>Dashboard</h1>
+            <p>In-app overzicht voor {activeLocationName}</p>
+          </div>
+          <div className="header-actions">
+            <a className="toggle" href="/">
+              Terug naar inbox
+            </a>
+          </div>
+        </header>
+
+        <section className="panel panel--leads dashboard-v2-toolbar">
+          <div className="dashboard-filters dashboard-filters--new">
+            <div className="field">
+              <label>Periode</label>
               <select
                 className="input"
-                value={selectedBrand}
-                onChange={(event) =>
-                  setSelectedBrand(
-                    event.target.value as "all" | "VastgoedMatch" | "TestAannemer"
-                  )
-                }
+                value={range}
+                onChange={(event) => setRange(event.target.value as RangeKey)}
               >
-                <option value="all">Alle merken</option>
-                <option value="VastgoedMatch">VastgoedMatch</option>
-                <option value="TestAannemer">TestAannemer</option>
+                <option value="today">Vandaag</option>
+                <option value="7d">Laatste 7 dagen</option>
+                <option value="30d">Laatste 30 dagen</option>
               </select>
             </div>
-            <div className="location-select">
-              <label>Subaccount</label>
-              <select
-                className="input"
-                value={selectedAccount}
-                onChange={(event) => setSelectedAccount(event.target.value)}
-              >
-                <option value="all">Alle subaccounts</option>
-                {accountOptions.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <button className="button button--ghost" onClick={() => void loadOverview()} disabled={loading}>
+              {loading ? "Laden..." : "Vernieuwen"}
+            </button>
           </div>
-          <a className="toggle" href="/">
-            Terug naar inbox
-          </a>
-        </div>
-      </header>
+        </section>
 
-      {error ? <div className="alert alert--error">{error}</div> : null}
+        {error ? <div className="alert alert--error">{error}</div> : null}
 
-      <section className="panel">
-        <header className="panel__header">
-          <h2>KPI’s per subaccount</h2>
-        </header>
-        <div className="panel__body">
-          <div className="kpi-grid">
-            {kpis.map((row) => (
-              <div className="kpi-card" key={row.account_id}>
-                <div className="kpi-card__title">{row.account_name}</div>
-                <div className="kpi-card__meta">
-                  Laatste msg: {formatDate(row.last_message_at)}
-                </div>
-                <div className="kpi-card__stats">
-                  <div>
-                    <span>Conversations</span>
-                    <strong>{row.conversations_total}</strong>
-                  </div>
-                  <div>
-                    <span>Inbound</span>
-                    <strong>{row.inbound_total}</strong>
-                  </div>
-                  <div>
-                    <span>Outbound</span>
-                    <strong>{row.outbound_total}</strong>
-                  </div>
-                  <div>
-                    <span>Drafts</span>
-                    <strong>{row.drafts_total}</strong>
-                  </div>
-                </div>
-              </div>
-            ))}
-            {kpis.length === 0 ? <div className="empty">Geen data.</div> : null}
-          </div>
-        </div>
-      </section>
-
-      <section className="panel">
-        <header className="panel__header">
-          <h2>Laatste AI drafts (niet verzonden)</h2>
-        </header>
-        <div className="panel__body">
-          <div className="draft-grid">
-            {filteredDrafts.filter((row) => !shouldHideDraft(row)).map((row) => (
-              <div
-                className={`draft-card ${expandedDraftId === row.draft_id ? "draft-card--expanded" : ""}`}
-                key={row.draft_id}
-                onClick={() =>
-                  setExpandedDraftId((prev) => (prev === row.draft_id ? null : row.draft_id))
+        <div className="dashboard-v2-layout">
+          <div className="dashboard-v2-main">
+            <section className="dashboard-v2-stats">
+              <StatCard
+                metricKey="leadsInTool"
+                title="Leads in tool"
+                value={overview?.kpis.leadsInTool.total ?? 0}
+                trend={overview ? `${formatDelta(overview.kpis.leadsInTool.deltaPct)} vs vorige periode` : ""}
+                helper={overview ? `${overview.kpis.leadsInTool.current} in ${periodLabel[overview.range]}` : "-"}
+                tone="blue"
+                onClick={openMetric}
+                icon={
+                  <svg viewBox="0 0 24 24" className="ghl-icon">
+                    <path d="M7.5 12a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm9 0a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zM3 20.5c0-3 3-5.5 6.5-5.5S16 17.5 16 20.5V22H3v-1.5zm9.5 1.5v-1.5c0-1.6-.6-3-1.6-4.1.8-.3 1.7-.4 2.6-.4 3.6 0 6.5 2.5 6.5 5.5V22h-7.5z" />
+                  </svg>
                 }
-                role="button"
-                tabIndex={0}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setExpandedDraftId((prev) =>
-                      prev === row.draft_id ? null : row.draft_id
-                    );
-                  }
-                }}
-              >
-                <div className="draft-card__header">
-                  <div>
-                    <div className="draft-card__title">{row.account_name ?? "—"}</div>
-                    <div className="draft-card__meta">
-                      {formatDate(row.draft_created_at)}
-                      {row.model ? ` • ${row.model}` : ""}
-                    </div>
-                  </div>
-                  <div className="draft-card__cost">
-                    <span>Kost</span>
-                    <strong>{formatCost(row.cost_eur)}</strong>
-                    <em>{row.tokens ? `${row.tokens} tokens` : "—"}</em>
-                  </div>
-                </div>
-                <div className="draft-card__content">
-                  <div className="draft-bubble draft-bubble--lead">
-                    <div className="draft-bubble__label">Lead</div>
-                    <div className="draft-bubble__text">
-                      {row.last_inbound_body ?? "Geen inbound bericht gevonden."}
-                    </div>
-                  </div>
-                  <div className="draft-bubble draft-bubble--ai">
-                    <div className="draft-bubble__label">AI antwoord (draft)</div>
-                    <div className="draft-bubble__text">
-                      {row.ai_reply ?? "Geen draft beschikbaar."}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-            {filteredDrafts.length === 0 ? (
-              <div className="empty">Geen data.</div>
-            ) : null}
-          </div>
-        </div>
-      </section>
-
-      <section className="panel">
-        <header className="panel__header">
-          <h2>Lost drafts (test)</h2>
-        </header>
-        <div className="panel__body">
-          {lostError ? <div className="alert alert--error">{lostError}</div> : null}
-          <div className="draft-grid">
-            {filteredLostDrafts.map((row) => (
-              <div
-                className={`draft-card ${expandedLostId === row.lost_id ? "draft-card--expanded" : ""}`}
-                key={row.lost_id}
-                onClick={() =>
-                  setExpandedLostId((prev) => (prev === row.lost_id ? null : row.lost_id))
+              />
+              <StatCard
+                metricKey="messagesSent"
+                title="Berichten verzonden"
+                value={overview?.kpis.messagesSent.current ?? 0}
+                trend={overview ? `${formatDelta(overview.kpis.messagesSent.deltaPct)} vs vorige periode` : ""}
+                helper="SMS + Agent berichten vanuit de tool"
+                tone="green"
+                onClick={openMetric}
+                icon={
+                  <svg viewBox="0 0 24 24" className="ghl-icon">
+                    <path d="M4 5h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H8l-4 4V7a2 2 0 0 1 2-2zm3 4h10v2H7V9zm0 4h7v2H7v-2z" />
+                  </svg>
                 }
-                role="button"
-                tabIndex={0}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setExpandedLostId((prev) => (prev === row.lost_id ? null : row.lost_id));
-                  }
-                }}
-              >
-                <div className="draft-card__header">
-                  <div>
-                    <div className="draft-card__title">{row.account_name ?? "—"}</div>
-                    <div className="draft-card__meta">
-                      {formatDate(row.lost_created_at)}
-                      {row.model ? ` • ${row.model}` : ""}
-                      {row.status ? ` • ${row.status}` : ""}
-                    </div>
-                  </div>
-                  <div className="draft-card__cost">
-                    <span>Confidence</span>
-                    <strong>{formatConfidence(row.confidence)}</strong>
-                    <em>{row.tokens ? `${row.tokens} tokens` : "—"}</em>
-                  </div>
-                </div>
-                <div className="draft-card__content">
-                  <div className="draft-bubble draft-bubble--lead">
-                    <div className="draft-bubble__label">Lead</div>
-                    <div className="draft-bubble__text">
-                      {row.last_inbound_body ?? "Geen inbound bericht gevonden."}
-                    </div>
-                  </div>
-                  <div className="draft-bubble draft-bubble--lost">
-                    <div className="draft-bubble__label">Lost draft</div>
-                    <div className="draft-bubble__text">
-                      {row.reason ?? "Geen reden meegegeven."}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-            {filteredLostDrafts.length === 0 ? (
-              <div className="empty">Geen data.</div>
-            ) : null}
-          </div>
-        </div>
-      </section>
+              />
+              <StatCard
+                metricKey="aiChatsStarted"
+                title="AI chats gestart"
+                value={overview?.kpis.aiChatsStarted.current ?? 0}
+                trend={overview ? `${formatDelta(overview.kpis.aiChatsStarted.deltaPct)} vs vorige periode` : ""}
+                helper="Eerste AI bericht verzonden"
+                tone="orange"
+                onClick={openMetric}
+                icon={
+                  <svg viewBox="0 0 24 24" className="ghl-icon">
+                    <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2zm7 9l.9 2.6L22 14l-2.1.4L19 17l-.9-2.6L16 14l2.1-.4L19 11zM5 13l.9 2.6L8 16l-2.1.4L5 19l-.9-2.6L2 16l2.1-.4L5 13z" />
+                  </svg>
+                }
+              />
+              <StatCard
+                metricKey="repliesReceived"
+                title="Reacties ontvangen"
+                value={overview?.kpis.repliesReceived.current ?? 0}
+                trend={overview ? `${formatDelta(overview.kpis.repliesReceived.deltaPct)} vs vorige periode` : ""}
+                helper="Unieke inkomende antwoorden"
+                tone="attention"
+                onClick={openMetric}
+                icon={
+                  <svg viewBox="0 0 24 24" className="ghl-icon">
+                    <path d="M12 9v4m0 4h.01M4.9 19h14.2a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L3.2 16a2 2 0 0 0 1.7 3z" />
+                  </svg>
+                }
+              />
+            </section>
 
-      <section className="panel">
-        <header className="panel__header">
-          <h2>Dagvolume (inbound/outbound)</h2>
-        </header>
-        <div className="panel__body">
-          <div className="table">
-            <div className="table__row table__head">
-              <div>Account</div>
-              <div>Dag</div>
-              <div>Inbound</div>
-              <div>Outbound</div>
-            </div>
-            {daily.map((row, idx) => (
-              <div className="table__row" key={`${row.account_name}-${row.day}-${idx}`}>
-                <div>{row.account_name}</div>
-                <div>{row.day ? row.day.slice(0, 10) : "—"}</div>
-                <div>{row.inbound_count}</div>
-                <div>{row.outbound_count}</div>
+            <section className="panel panel--leads dashboard-v2-funnel">
+              <header className="panel__header dashboard-v2-funnel__header">
+                <h2>Lead Funnel</h2>
+              </header>
+              <div className="panel__body dashboard-v2-funnel__body">
+                <FunnelBar
+                  label="Leads in tool"
+                  value={overview?.funnel.leadsInTool ?? 0}
+                  width={toPct(overview?.funnel.leadsInTool ?? 0)}
+                  tone="blue"
+                />
+                <FunnelBar
+                  label="AI gestart"
+                  value={overview?.funnel.aiStarted ?? 0}
+                  width={toPct(overview?.funnel.aiStarted ?? 0)}
+                  tone="blue"
+                />
+                <FunnelBar
+                  label="Reacties"
+                  value={overview?.funnel.reactions ?? 0}
+                  width={toPct(overview?.funnel.reactions ?? 0)}
+                  tone="green"
+                />
+                <FunnelBar
+                  label="Sales overdracht"
+                  value={overview?.funnel.salesHandover ?? 0}
+                  width={toPct(overview?.funnel.salesHandover ?? 0)}
+                  tone="orange"
+                />
+                <FunnelBar
+                  label="Review nodig"
+                  value={overview?.funnel.reviewNeeded ?? 0}
+                  width={toPct(overview?.funnel.reviewNeeded ?? 0)}
+                  tone="attention"
+                />
+
+                <div className="dashboard-v2-funnel__meta">
+                  <div>
+                    Conversie <strong>{overview ? `${Math.round((overview.performance.conversionRate ?? 0) * 100)}%` : "-"}</strong>
+                  </div>
+                  <div>
+                    Gem. responstijd <strong>{formatMinutes(overview?.performance.avgResponseMinutes)}</strong>
+                  </div>
+                </div>
               </div>
-            ))}
-            {daily.length === 0 ? <div className="empty">Geen data.</div> : null}
+            </section>
+
+            <section className="panel panel--leads dashboard-note">
+              <div className="panel__body">
+                <p>
+                  Dit dashboard gebruikt enkel in-app data uit deze tool (workflow sessies/events en
+                  workflow verstuurde stappen), niet live GHL tellingen.
+                </p>
+              </div>
+            </section>
           </div>
+
+          <aside className="dashboard-v2-side">
+            <ActivityList items={overview?.activeRequests ?? []} />
+            <section className="panel panel--leads dashboard-v2-sidecard">
+              <header className="panel__header dashboard-v2-sidecard__header">
+                <h2>Performance</h2>
+              </header>
+              <div className="panel__body dashboard-v2-sidecard__body">
+                <div className="dashboard-v2-kv">
+                  <span>Subaccount</span>
+                  <strong>{activeLocationName}</strong>
+                </div>
+                <div className="dashboard-v2-kv">
+                  <span>Periode</span>
+                  <strong>{periodLabel[range]}</strong>
+                </div>
+                <div className="dashboard-v2-kv">
+                  <span>AI gestart</span>
+                  <strong>{overview?.funnel.aiStarted ?? 0}</strong>
+                </div>
+                <div className="dashboard-v2-kv">
+                  <span>Sales overdracht</span>
+                  <strong>{overview?.funnel.salesHandover ?? 0}</strong>
+                </div>
+                <div className="dashboard-v2-kv">
+                  <span>Review nodig</span>
+                  <strong>{overview?.funnel.reviewNeeded ?? 0}</strong>
+                </div>
+              </div>
+            </section>
+          </aside>
         </div>
-      </section>
+      </main>
+
+      <DrilldownModal
+        open={Boolean(activeMetric)}
+        metric={activeMetric}
+        data={drilldown}
+        loading={drilldownLoading}
+        error={drilldownError}
+        onClose={() => setActiveMetric(null)}
+        onRefresh={() => {
+          if (!activeMetric) return;
+          void loadDrilldown(activeMetric);
+        }}
+      />
     </div>
   );
 };

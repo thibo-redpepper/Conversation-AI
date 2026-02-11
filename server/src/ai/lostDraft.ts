@@ -35,10 +35,80 @@ const RULE_PHRASES = [
   "heb al een aannemer",
 ];
 
-const ruleMatch = (text: string): LostDecision | null => {
+const normalizeKeywordHints = (keywords?: string[] | null) => {
+  if (!Array.isArray(keywords)) return RULE_PHRASES;
+  const unique = new Set<string>();
+  for (const raw of keywords) {
+    const normalized = normalize(raw).slice(0, 120);
+    if (!normalized) continue;
+    unique.add(normalized);
+    if (unique.size >= 80) break;
+  }
+  return unique.size > 0 ? [...unique] : RULE_PHRASES;
+};
+
+const PROMPT_STOPWORDS = new Set([
+  "de",
+  "het",
+  "een",
+  "en",
+  "of",
+  "op",
+  "als",
+  "dan",
+  "bij",
+  "van",
+  "voor",
+  "naar",
+  "met",
+  "dat",
+  "dit",
+  "die",
+  "ze",
+  "zij",
+  "je",
+  "jij",
+  "we",
+  "wij",
+  "ik",
+  "te",
+  "om",
+  "in",
+  "uit",
+  "aan",
+  "markeer",
+  "markeren",
+  "lead",
+  "leads",
+  "lost",
+]);
+
+const derivePromptKeywordHints = (prompt?: string | null) => {
+  const normalized = normalize(prompt);
+  if (!normalized) return [] as string[];
+
+  const relevantBlock = normalized.includes(" als ")
+    ? normalized.split(" als ").slice(1).join(" ")
+    : normalized;
+  const tokens = relevantBlock
+    .split(/[^a-z0-9à-ÿ]+/i)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const unique = new Set<string>();
+  for (const token of tokens) {
+    if (token.length < 4) continue;
+    if (PROMPT_STOPWORDS.has(token)) continue;
+    unique.add(token);
+    if (unique.size >= 20) break;
+  }
+  return [...unique];
+};
+
+const ruleMatch = (text: string, keywordHints?: string[] | null): LostDecision | null => {
   const normalized = normalize(text);
   if (!normalized) return null;
-  const hit = RULE_PHRASES.find((phrase) => normalized.includes(phrase));
+  const hit = normalizeKeywordHints(keywordHints).find((phrase) => normalized.includes(phrase));
   if (!hit) return null;
   return {
     isLost: true,
@@ -66,18 +136,27 @@ const parseDecision = (raw: string) => {
 export const classifyLostDraft = async ({
   text,
   subject,
+  conversationContext,
+  lostDecisionPrompt,
+  keywordHints,
 }: {
   text?: string | null;
   subject?: string | null;
+  conversationContext?: string | null;
+  lostDecisionPrompt?: string | null;
+  keywordHints?: string[] | null;
 }): Promise<LostDecision> => {
   const combined = [subject, text].filter(Boolean).join("\n").trim();
+  const context = [conversationContext, combined].filter(Boolean).join("\n\n").trim();
   if (!combined) {
     return { isLost: false };
   }
+  const promptHints = derivePromptKeywordHints(lostDecisionPrompt);
+  const mergedHints = Array.from(new Set([...normalizeKeywordHints(keywordHints), ...promptHints]));
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return ruleMatch(combined) ?? { isLost: false };
+    return ruleMatch(context, mergedHints) ?? { isLost: false };
   }
 
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -89,9 +168,23 @@ export const classifyLostDraft = async ({
   const usdToEur = Number.isFinite(rawFx) && rawFx > 0 ? rawFx : 0.92;
 
   const client = new OpenAI({ apiKey });
-  const systemPrompt =
-    "Je bent een classifier voor inbound klantberichten. Bepaal of het bericht aangeeft dat de lead geen interesse heeft, wil stoppen met contact, of expliciet niet meer gebeld/gecontacteerd wil worden. Geef alleen JSON terug met velden: is_lost (boolean), reason (korte uitleg), confidence (0-1).";
-  const userPrompt = `Bericht:\n"""${combined}"""\n\nGeef JSON.`;
+  const customPrompt =
+    typeof lostDecisionPrompt === "string" && lostDecisionPrompt.trim().length > 0
+      ? lostDecisionPrompt.trim().slice(0, 4000)
+      : "";
+  const baseSystemPrompt = customPrompt
+    ? "Je bent een classifier voor inbound klantberichten. BELANGRIJK: gebruik de agent-specifieke beoordelingsregels hieronder als hoogste prioriteit. Markeer `is_lost=true` zodra die regels dit aangeven, ook als dat afwijkt van een klassieke lost-definitie. Geef alleen JSON terug met velden: is_lost (boolean), reason (korte uitleg), confidence (0-1)."
+    : "Je bent een classifier voor inbound klantberichten. Bepaal of het bericht aangeeft dat de lead verloren is (geen interesse, stopzetting, expliciete afmelding of duidelijk negatief koopintentsignaal). Geef alleen JSON terug met velden: is_lost (boolean), reason (korte uitleg), confidence (0-1).";
+  const keywordHintsBlock = mergedHints.join(", ");
+  const systemPrompt = customPrompt
+    ? `${baseSystemPrompt}\n\nAgent-specifieke beoordelingsregels:\n${customPrompt}`
+    : baseSystemPrompt;
+  const userPrompt = `Context (laatste deel van gesprek en nieuwste bericht):
+"""${context}"""
+
+Keyword-hints (fallback): ${keywordHintsBlock}
+
+Geef alleen JSON.`;
 
   try {
     const response = await client.responses.create({
@@ -122,14 +215,35 @@ export const classifyLostDraft = async ({
     const isLost = typeof isLostRaw === "boolean" ? isLostRaw : false;
     const reason =
       typeof parsed?.reason === "string" ? parsed.reason.trim().slice(0, 200) : undefined;
-    const confidenceRaw = typeof parsed?.confidence === "number" ? parsed.confidence : undefined;
-    const confidence = Number.isFinite(confidenceRaw)
+    const confidenceRaw =
+      typeof parsed?.confidence === "number"
+        ? parsed.confidence
+        : typeof parsed?.confidence_score === "number"
+        ? parsed.confidence_score
+        : undefined;
+    const confidence = typeof confidenceRaw === "number" && Number.isFinite(confidenceRaw)
       ? clamp(confidenceRaw)
       : isLost
         ? 0.5
         : undefined;
 
     if (parsed) {
+      const promptRule = promptHints.length > 0 ? ruleMatch(context, promptHints) : null;
+      if (promptRule?.isLost) {
+        return {
+          isLost: true,
+          reason: promptRule.reason ?? reason ?? "custom_prompt_rule_match",
+          confidence: Math.max(confidence ?? 0.5, 0.8),
+          usage: { inputTokens, outputTokens, totalTokens },
+          cost: {
+            usd: Number.isFinite(costUsd) ? costUsd : undefined,
+            eur: Number.isFinite(costEur) ? costEur : undefined,
+            usdToEurRate: usdToEur,
+            model,
+          },
+          source: "rules",
+        };
+      }
       return {
         isLost,
         reason,
@@ -145,7 +259,7 @@ export const classifyLostDraft = async ({
       };
     }
 
-    const fallback = ruleMatch(combined);
+    const fallback = ruleMatch(context, mergedHints);
     if (fallback) {
       return {
         ...fallback,
@@ -171,6 +285,6 @@ export const classifyLostDraft = async ({
       source: "ai",
     };
   } catch {
-    return ruleMatch(combined) ?? { isLost: false };
+    return ruleMatch(context, mergedHints) ?? { isLost: false };
   }
 };
